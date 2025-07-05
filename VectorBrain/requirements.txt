@@ -1,0 +1,24 @@
+# Web Server
+Flask>=2.0 # or FastAPI>=0.70
+
+# HTTP Client
+requests>=2.25
+
+# LLM Interaction (examples, choose based on your LLM)
+# openai>=1.0 # If using OpenAI compatible APIs or OpenAI's own models
+# llama-cpp-python>=0.2.20 # If using Llama.cpp locally
+# transformers>=4.20 # If using Hugging Face Transformers
+
+# Image Processing (optional, for handling camera images if needed beyond base64)
+Pillow>=9.0
+
+# Vector Database (optional, for future memory module)
+# chromadb>=0.4
+
+# Configuration (optional, if using .env files for example)
+# python-dotenv>=0.20
+
+# Other utilities
+# pydantic # For data validation, especially with FastAPI
+# uvicorn # For running FastAPI applications
+# gunicorn # For running Flask/FastAPI in production
