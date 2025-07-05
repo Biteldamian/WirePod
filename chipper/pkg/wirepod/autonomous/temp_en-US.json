@@ -1,0 +1,52 @@
+[
+	{
+		"name" : "intent_names_username_extend",
+		"keyphrases": ["name is", "native is", "names", "name's", "my name is" ],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_weather_extend",
+		"keyphrases" : ["weather", "whether", "the other", "the water", "no other", "weather forecast", "weather tomorrow", "whats the weather" ],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_names_ask",
+		"keyphrases" : ["my name", "who am", "who am i"],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_knowledge_promptquestion",
+		"keyphrases" : ["question", "weston", "i have a question", "conversation", "lets talk", "let's talk" ],
+		"requiresexact": false
+	},
+    {
+		"name": "intent_imperative_eyecolor_extend",
+		"keyphrases": ["eye color", "eyes color", "ice color", "icecolor", "icolor", "change eye color", "change my eye color", "change his eye color", "set eye color", "set my eye color", "set his eye color"],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_imperative_volume_extend",
+		"keyphrases": ["volume", "turn up volume", "turn down volume", "set volume", "change volume"],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_clock_settimer_extend",
+		"keyphrases": ["set a timer", "set timer", "start a timer", "start timer"],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_global_stop_extend",
+		"keyphrases": ["stop", "that's enough", "that is enough", "quiet", "shush", "hush"],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_greeting_hello",
+		"keyphrases": ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening", "howdy"],
+		"requiresexact": false
+	},
+	{
+		"name": "intent_start_autonomous_mode",
+		"keyphrases": ["start autonomous mode", "enter autonomous mode", "go autonomous", "begin autonomous mode", "initiate autonomous sequence"],
+		"requiresexact": false
+	}
+]
