@@ -1,0 +1,196 @@
+package vars
+
+import (
+	"encoding/json"
+	"os"
+	// "time" // Not strictly needed here as CycleIntervalSec is int, conversion happens in autonomous.go
+
+	"github.com/kercre123/wire-pod/chipper/pkg/logger"
+)
+
+// a way to create a JSON configuration for wire-pod, rather than the use of env vars
+
+var ApiConfigPath = "./apiConfig.json"
+
+var APIConfig apiConfig
+
+type apiConfig struct {
+	Weather struct {
+		Enable   bool   `json:"enable"`
+		Provider string `json:"provider"`
+		Key      string `json:"key"`
+		Unit     string `json:"unit"`
+	} `json:"weather"`
+	Knowledge struct {
+		Enable                 bool    `json:"enable"`
+		Provider               string  `json:"provider"`
+		Key                    string  `json:"key"`
+		ID                     string  `json:"id"` // Typically for Houndify
+		Model                  string  `json:"model"`
+		IntentGraph            bool    `json:"intentgraph"`
+		RobotName              string  `json:"robotName"`
+		OpenAIPrompt           string  `json:"openai_prompt"`
+		OpenAIVoice            string  `json:"openai_voice"`
+		OpenAIVoiceWithEnglish bool    `json:"openai_voice_with_english"`
+		SaveChat               bool    `json:"save_chat"`
+		CommandsEnable         bool    `json:"commands_enable"`
+		Endpoint               string  `json:"endpoint"`
+		TopP                   float32 `json:"top_p"`
+		Temperature            float32 `json:"temp"`
+	} `json:"knowledge"`
+	Autonomous struct {
+		Enable                 bool   `json:"enable"`                   // General switch for the feature
+		Provider               string `json:"provider"`                 // LLM Provider (e.g., "openai", "together", "custom") - can default to Knowledge.Provider
+		Key                    string `json:"key"`                      // API Key - can default to Knowledge.Key
+		Model                  string `json:"model"`                    // Specific LLM model - can default to Knowledge.Model or an autonomous-specific one
+		Endpoint               string `json:"endpoint"`                 // Custom endpoint if Provider is "custom" - can default to Knowledge.Endpoint
+		Prompt                 string `json:"prompt"`                   // System prompt for the LLM in autonomous mode
+		CycleIntervalSec       int    `json:"cycle_interval_sec"`       // How often Vector takes a picture and queries LLM (in seconds)
+		ImageResolutionHigh    bool   `json:"image_resolution_high"`    // True for high-res images, false for low-res
+		MaxConversationHistory int    `json:"max_conversation_history"` // Number of past user/assistant messages to keep
+		UseKGSettingsFallback  bool   `json:"use_kg_settings_fallback"` // If true, uses Knowledge.* settings if specific Autonomous settings are empty
+	} `json:"autonomous"`
+	STT struct {
+		Service  string `json:"provider"`
+		Language string `json:"language"`
+	} `json:"STT"`
+	Server struct {
+		// false for ip, true for escape pod
+		EPConfig bool   `json:"epconfig"`
+		Port     string `json:"port"`
+	} `json:"server"`
+	HasReadFromEnv   bool `json:"hasreadfromenv"`
+	PastInitialSetup bool `json:"pastinitialsetup"`
+}
+
+func WriteConfigToDisk() {
+	logger.Println("Configuration changed, writing to disk")
+	writeBytes, _ := json.MarshalIndent(APIConfig, "", "  ") // Using MarshalIndent for readability
+	os.WriteFile(ApiConfigPath, writeBytes, 0644)
+}
+
+func CreateConfigFromEnv() {
+	// if no config exists, create it
+	// Initialize with defaults, especially for new structs/fields
+	APIConfig.Autonomous.Enable = false // Default to disabled
+	APIConfig.Autonomous.UseKGSettingsFallback = true // Default to using KG settings as fallback
+	APIConfig.Autonomous.CycleIntervalSec = 10
+	APIConfig.Autonomous.ImageResolutionHigh = false
+	APIConfig.Autonomous.MaxConversationHistory = 10
+	APIConfig.Autonomous.Prompt = "You are Vector, an autonomous robot. You will be given images from your camera. Respond with commands to interact with your environment or speak. Available commands: {{sayText||text_to_say}}, {{driveWheels||left_speed_mmps,right_speed_mmps,duration_ms}}, {{turnInPlace||angle_deg,speed_dps}}, {{moveLift||speed_dps}}, {{setLiftHeight||height_0_to_1}}, {{moveHead||speed_dps}}, {{setHeadAngle||angle_deg}}, {{playAnimation||anim_alias}}, {{getCameraImage||now}}. Example: 'I see a person. {{sayText||Hello!}} {{driveWheels||50,50,1000}}'"
+
+
+	if os.Getenv("WEATHERAPI_ENABLED") == "true" {
+		APIConfig.Weather.Enable = true
+		APIConfig.Weather.Provider = os.Getenv("WEATHERAPI_PROVIDER")
+		APIConfig.Weather.Key = os.Getenv("WEATHERAPI_KEY")
+		APIConfig.Weather.Unit = os.Getenv("WEATHERAPI_UNIT")
+	} else {
+		APIConfig.Weather.Enable = false
+	}
+	if os.Getenv("KNOWLEDGE_ENABLED") == "true" {
+		APIConfig.Knowledge.Enable = true
+		APIConfig.Knowledge.Provider = os.Getenv("KNOWLEDGE_PROVIDER")
+		if os.Getenv("KNOWLEDGE_PROVIDER") == "houndify" {
+			APIConfig.Knowledge.ID = os.Getenv("KNOWLEDGE_ID")
+		}
+		APIConfig.Knowledge.Key = os.Getenv("KNOWLEDGE_KEY")
+	} else {
+		APIConfig.Knowledge.Enable = false
+	}
+	WriteSTT() // Assuming this handles STT specific env vars
+	APIConfig.HasReadFromEnv = true
+	// Write with indent for first creation
+	WriteConfigToDisk()
+	logger.Println("API config JSON created from environment variables (if any) and defaults.")
+}
+
+func WriteSTT() {
+	// was not part of the original code, so this is its own function
+	// launched if stt not found in config
+	APIConfig.STT.Service = os.Getenv("STT_SERVICE")
+	if os.Getenv("STT_SERVICE") == "vosk" || os.Getenv("STT_SERVICE") == "whisper.cpp" {
+		APIConfig.STT.Language = os.Getenv("STT_LANGUAGE")
+	}
+}
+
+func ReadConfig() {
+	if _, err := os.Stat(ApiConfigPath); err != nil {
+		CreateConfigFromEnv()
+	} else {
+		configBytes, err := os.ReadFile(ApiConfigPath)
+		if err != nil {
+			logger.Println("Failed to read API config file, creating new one with defaults:", err)
+			CreateConfigFromEnv() // Create a new one if reading fails badly
+			return
+		}
+
+		// Store a copy of current config to check if Autonomous part was unmarshalled
+		var tempConfig apiConfig
+		if err := json.Unmarshal(configBytes, &tempConfig); err != nil {
+			logger.Println("Failed to unmarshal API config JSON, creating new one with defaults:", err)
+			CreateConfigFromEnv() // Create a new one if unmarshalling fails
+			return
+		}
+		APIConfig = tempConfig // Assign successfully unmarshalled config
+
+		// Initialize new Autonomous fields with defaults if they are missing (e.g. from an old config file)
+		// A zero-valued struct means it was likely not in the JSON.
+		isOldConfig := (APIConfig.Autonomous == struct {
+			Enable                 bool   `json:"enable"`
+			Provider               string `json:"provider"`
+			Key                    string `json:"key"`
+			Model                  string `json:"model"`
+			Endpoint               string `json:"endpoint"`
+			Prompt                 string `json:"prompt"`
+			CycleIntervalSec       int    `json:"cycle_interval_sec"`
+			ImageResolutionHigh    bool   `json:"image_resolution_high"`
+			MaxConversationHistory int    `json:"max_conversation_history"`
+			UseKGSettingsFallback  bool   `json:"use_kg_settings_fallback"`
+		}{})
+
+		if isOldConfig {
+			logger.Println("Older config detected or Autonomous section missing. Initializing Autonomous defaults.")
+			APIConfig.Autonomous.Enable = false // Default to disabled
+			APIConfig.Autonomous.UseKGSettingsFallback = true
+			APIConfig.Autonomous.CycleIntervalSec = 10
+			APIConfig.Autonomous.ImageResolutionHigh = false
+			APIConfig.Autonomous.MaxConversationHistory = 10
+			APIConfig.Autonomous.Prompt = "You are Vector, an autonomous robot. You will be given images from your camera. Respond with commands to interact with your environment or speak. Available commands: {{sayText||text_to_say}}, {{driveWheels||left_speed_mmps,right_speed_mmps,duration_ms}}, {{turnInPlace||angle_deg,speed_dps}}, {{moveLift||speed_dps}}, {{setLiftHeight||height_0_to_1}}, {{moveHead||speed_dps}}, {{setHeadAngle||angle_deg}}, {{playAnimation||anim_alias}}, {{getCameraImage||now}}. Example: 'I see a person. {{sayText||Hello!}} {{driveWheels||50,50,1000}}'"
+		} else {
+			// If not an old config, still ensure some critical defaults if they are zero (e.g. user manually deleted them)
+			if APIConfig.Autonomous.CycleIntervalSec == 0 {
+				APIConfig.Autonomous.CycleIntervalSec = 10
+			}
+			if APIConfig.Autonomous.MaxConversationHistory == 0 {
+				APIConfig.Autonomous.MaxConversationHistory = 10
+			}
+			if APIConfig.Autonomous.Prompt == "" {
+				APIConfig.Autonomous.Prompt = "You are Vector, an autonomous robot. You will be given images from your camera. Respond with commands to interact with your environment or speak. Available commands: {{sayText||text_to_say}}, {{driveWheels||left_speed_mmps,right_speed_mmps,duration_ms}}, {{turnInPlace||angle_deg,speed_dps}}, {{moveLift||speed_dps}}, {{setLiftHeight||height_0_to_1}}, {{moveHead||speed_dps}}, {{setHeadAngle||angle_deg}}, {{playAnimation||anim_alias}}, {{getCameraImage||now}}. Example: 'I see a person. {{sayText||Hello!}} {{driveWheels||50,50,1000}}'"
+			}
+		}
+
+
+		// STT service can be overridden by env var
+		if os.Getenv("STT_SERVICE") != "" && APIConfig.STT.Service != os.Getenv("STT_SERVICE") {
+			logger.Println("STT_SERVICE environment variable differs from config, updating config.")
+			WriteSTT() // This updates APIConfig.STT based on env
+		}
+
+		if !APIConfig.HasReadFromEnv { // This logic might be for very old migration
+			if APIConfig.Server.Port != os.Getenv("DDL_RPC_PORT") && os.Getenv("DDL_RPC_PORT") != "" {
+				APIConfig.HasReadFromEnv = true
+				APIConfig.PastInitialSetup = true // Assuming if DDL_RPC_PORT was set, setup was done
+			}
+		}
+
+		if APIConfig.Knowledge.Model == "meta-llama/Llama-2-70b-chat-hf" {
+			logger.Println("Outdated Together model (Llama-2-70b-chat-hf) found in config, updating to Llama-3-70b-chat-hf.")
+			APIConfig.Knowledge.Model = "meta-llama/Llama-3-70b-chat-hf"
+		}
+
+		// Write back any modifications (like default initializations for new fields)
+		WriteConfigToDisk()
+		logger.Println("API config successfully read and potentially updated with defaults.")
+	}
+}

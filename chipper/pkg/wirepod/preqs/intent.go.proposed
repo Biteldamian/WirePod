@@ -1,0 +1,125 @@
+package processreqs
+
+import (
+	"context" // Added for passing context to StartAutonomousMode if needed
+	"strings"
+
+	"github.com/kercre123/wire-pod/chipper/pkg/logger"
+	"github.com/kercre123/wire-pod/chipper/pkg/vars"
+	"github.com/kercre123/wire-pod/chipper/pkg/vtt"
+	sr "github.com/kercre123/wire-pod/chipper/pkg/wirepod/speechrequest"
+	ttr "github.com/kercre123/wire-pod/chipper/pkg/wirepod/ttr"
+)
+
+// This is here for compatibility with 1.6 and older software
+func (s *Server) ProcessIntent(req *vtt.IntentRequest) (*vtt.IntentResponse, error) {
+	var successMatched bool
+	speechReq := sr.ReqToSpeechRequest(req)
+	var transcribedText string
+	if !isSti {
+		var err error
+		transcribedText, err = sttHandler(speechReq)
+		if err != nil {
+			ttr.IntentPass(req, "intent_system_noaudio", "voice processing error: "+err.Error(), map[string]string{"error": err.Error()}, true)
+			return nil, nil
+		}
+		if strings.TrimSpace(transcribedText) == "" {
+			ttr.IntentPass(req, "intent_system_noaudio", "", map[string]string{}, false)
+			return nil, nil
+		}
+
+		// BEGIN AUTONOMOUS MODE INTENT CHECK
+		// Define keyphrases for starting and stopping autonomous mode
+		// These should ideally be configurable or part of a more structured intent definition
+		autonomousStartKeyphrases := []string{"start autonomous mode", "enter autonomous mode", "begin autonomous mode", "go autonomous", "activate autonomous mode"}
+		autonomousStopKeyphrases := []string{"stop autonomous mode", "exit autonomous mode", "end autonomous mode", "disable autonomous", "deactivate autonomous mode"}
+
+		lowerTranscribedText := strings.ToLower(transcribedText)
+		var intentParams map[string]string // Define intentParams for use with IntentPass
+
+		// Check for stop phrases first
+		for _, phrase := range autonomousStopKeyphrases {
+			if strings.Contains(lowerTranscribedText, phrase) {
+				logger.Println("Bot " + speechReq.Device + " matched autonomous mode STOP intent with phrase: '" + phrase + "'")
+				err := ttr.StopAutonomousMode() // StopAutonomousMode now handles its own voice confirmation
+				if err != nil {
+					logger.Println("Error stopping autonomous mode:", err)
+					// StopAutonomousMode already tries to say "Autonomous mode stopped."
+					// If it errors, it might be because robot is nil or behavior control fails.
+					// We can send a generic failure if needed, but StopAutonomousMode should be robust.
+					// ttr.IntentPass(req, "intent_imperative_negative", "Error stopping autonomous mode.", intentParams, false)
+				}
+				// No explicit IntentPass needed here as StopAutonomousMode handles confirmation.
+				return nil, nil // Intent handled
+			}
+		}
+
+		// Check for start phrases
+		for _, phrase := range autonomousStartKeyphrases {
+			if strings.Contains(lowerTranscribedText, phrase) {
+				logger.Println("Bot " + speechReq.Device + " matched autonomous mode START intent with phrase: '" + phrase + "'")
+				robotInstance, err := vars.GetRobot(speechReq.Device)
+				if err != nil {
+					logger.Println("Error getting robot instance for autonomous mode:", err)
+					ttr.IntentPass(req, "intent_system_error", "Error preparing for autonomous mode.", intentParams, false)
+					return nil, nil
+				}
+				err = ttr.StartAutonomousMode(robotInstance, context.Background(), nil) // nil for intentParams for now
+				if err != nil {
+					logger.Println("Error starting autonomous mode:", err)
+					if err.Error() == "autonomous mode is already running" {
+						// StartAutonomousMode doesn't say "already running", so we do it here.
+						ttr.IntentPass(req, "intent_imperative_affirmative", "I'm already in autonomous mode.", intentParams, false)
+					} else {
+						ttr.IntentPass(req, "intent_system_error", "Error starting autonomous mode.", intentParams, false)
+					}
+				}
+				// StartAutonomousMode now handles its own affirmative response ("Starting autonomous mode...")
+				// So, no explicit IntentPass needed here.
+				return nil, nil // Intent handled
+			}
+		}
+		// END AUTONOMOUS MODE INTENT CHECK
+
+		successMatched = ttr.ProcessTextAll(req, transcribedText, vars.IntentList, speechReq.IsOpus)
+	} else { // isSti == true
+		intent, slots, err := stiHandler(speechReq)
+		if err != nil {
+			if err.Error() == "inference not understood" {
+				logger.Println("No intent was matched")
+				ttr.IntentPass(req, "intent_system_unmatched", "voice processing error", map[string]string{"error": err.Error()}, true)
+				return nil, nil
+			}
+			logger.Println(err)
+			ttr.IntentPass(req, "intent_system_noaudio", "voice processing error", map[string]string{"error": err.Error()}, true)
+			return nil, nil
+		}
+		ttr.ParamCheckerSlotsEnUS(req, intent, slots, speechReq.IsOpus, speechReq.Device)
+		return nil, nil
+	}
+
+	// Fallback for non-STI if no regular intents matched by ProcessTextAll
+	if !isSti && !successMatched {
+		if vars.APIConfig.Knowledge.IntentGraph && vars.APIConfig.Knowledge.Enable {
+			logger.Println("Making LLM request for device " + req.Device + " for unmatched text: " + transcribedText)
+			// The `req` here is `*vtt.IntentRequest`. `StreamingKGSim` expects `interface{}`.
+			// The `StreamingKGSim` function in `kgsim.go` handles type assertion for `*vtt.IntentRequest`
+			// when `isKG` is false (which is the case here as we are in `ProcessIntent`).
+			// It will then try to use `IntentPass` if it's not a KG request, which is what we want for unmatched intents.
+			_, err := ttr.StreamingKGSim(req, req.Device, transcribedText, false)
+			if err != nil {
+				logger.Println("LLM error after ProcessTextAll fallback:", err.Error())
+				logger.LogUI("LLM error: " + err.Error())
+				// Fall through to standard unmatched if LLM also errors or isn't conclusive.
+				ttr.IntentPass(req, "intent_system_unmatched", transcribedText, map[string]string{"error": err.Error()}, true)
+			}
+		} else {
+			logger.Println("No intent was matched by ProcessTextAll, and IntentGraph/KG is not enabled for fallback.")
+			ttr.IntentPass(req, "intent_system_unmatched", transcribedText, map[string]string{}, false)
+		}
+		return nil, nil
+	}
+
+	logger.Println("Bot " + speechReq.Device + " request served.")
+	return nil, nil
+}

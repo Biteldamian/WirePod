@@ -1,0 +1,368 @@
+package wirepod_ttr
+
+import (
+	"bytes"
+	"context" // Added for StartAutonomousMode
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+
+	pb "github.com/digital-dream-labs/api/go/chipperpb"
+	"github.com/kercre123/wire-pod/chipper/pkg/logger"
+	"github.com/kercre123/wire-pod/chipper/pkg/scripting"
+	"github.com/kercre123/wire-pod/chipper/pkg/vars" // Added for vars.GetRobot
+	"github.com/kercre123/wire-pod/chipper/pkg/vtt"
+)
+
+type systemIntentResponseStruct struct {
+	Status       string `json:"status"`
+	ReturnIntent string `json:"returnIntent"`
+}
+
+func IntentPass(req interface{}, intentThing string, speechText string, intentParams map[string]string, isParam bool) (interface{}, error) {
+	var esn string
+	var req1 *vtt.IntentRequest
+	var req2 *vtt.IntentGraphRequest
+	var isIntentGraph bool
+	if str, ok := req.(*vtt.IntentRequest); ok {
+		req1 = str
+		esn = req1.Device
+		isIntentGraph = false
+	} else if str, ok := req.(*vtt.IntentGraphRequest); ok {
+		req2 = str
+		esn = req2.Device
+		isIntentGraph = true
+	}
+
+	// intercept if not intent graph but intent graph is enabled
+	if !isIntentGraph && vars.APIConfig.Knowledge.IntentGraph && intentThing == "intent_system_unmatched" {
+		intentThing = "intent_greeting_hello"
+	}
+
+	var intentResult pb.IntentResult
+	if isParam {
+		intentResult = pb.IntentResult{
+			QueryText:  speechText,
+			Action:     intentThing,
+			Parameters: intentParams,
+		}
+	} else {
+		intentResult = pb.IntentResult{
+			QueryText: speechText,
+			Action:    intentThing,
+		}
+	}
+	logger.LogUI("Intent matched: " + intentThing + ", transcribed text: '" + speechText + "', device: " + esn)
+	if isParam {
+		logger.LogUI("Parameters sent: " + fmt.Sprint(intentParams))
+	}
+	intent := pb.IntentResponse{
+		IsFinal:      true,
+		IntentResult: &intentResult,
+	}
+	intentGraphSend := pb.IntentGraphResponse{
+		ResponseType: pb.IntentGraphMode_INTENT,
+		IsFinal:      true,
+		IntentResult: &intentResult,
+		CommandType:  pb.RobotMode_VOICE_COMMAND.String(),
+	}
+	if !isIntentGraph {
+		if err := req1.Stream.Send(&intent); err != nil {
+			return nil, err
+		}
+		r := &vtt.IntentResponse{
+			Intent: &intent,
+		}
+		logger.Println("Bot " + esn + " Intent Sent: " + intentThing)
+		if isParam {
+			logger.Println("Bot "+esn+" Parameters Sent:", intentParams)
+		} else {
+			logger.Println("No Parameters Sent")
+		}
+		return r, nil
+	} else {
+		if err := req2.Stream.Send(&intentGraphSend); err != nil {
+			return nil, err
+		}
+		r := &vtt.IntentGraphResponse{
+			Intent: &intentGraphSend,
+		}
+		logger.Println("Bot " + esn + " Intent Sent: " + intentThing)
+		if isParam {
+			logger.Println("Bot "+esn+" Parameters Sent:", intentParams)
+		} else {
+			logger.Println("No Parameters Sent")
+		}
+		return r, nil
+	}
+}
+
+func customIntentHandler(req interface{}, voiceText string, botSerial string) bool {
+	var successMatched bool = false
+	if vars.CustomIntentsExist {
+		for _, c := range vars.CustomIntents {
+			for _, v := range c.Utterances {
+				var seekText = strings.ToLower(strings.TrimSpace(v))
+				if (c.IsSystemIntent && strings.HasPrefix(seekText, "*")) || strings.Contains(voiceText, seekText) {
+					logger.Println("Bot " + botSerial + " Custom Intent Matched: " + c.Name + " - " + c.Description + " - " + c.Intent)
+					var intentParams map[string]string
+					var isParam bool = false
+					if c.Params.ParamValue != "" {
+						logger.Println("Bot " + botSerial + " Custom Intent Parameter: " + c.Params.ParamName + " - " + c.Params.ParamValue)
+						intentParams = map[string]string{c.Params.ParamName: c.Params.ParamValue}
+						isParam = true
+					}
+
+					// START AUTONOMOUS MODE HANDLING
+					if c.Intent == "intent_wirepod_autonomous_start" {
+						logger.Println("Custom Intent: Matched intent_wirepod_autonomous_start")
+						robotInstance, err := vars.GetRobot(botSerial)
+						if err != nil {
+							logger.Println("Error getting robot instance for autonomous mode:", err)
+							IntentPass(req, "intent_system_error", "Error preparing for autonomous mode.", intentParams, isParam)
+						} else {
+							// Assuming StartAutonomousMode is in the same package (wirepod_ttr)
+							err = StartAutonomousMode(robotInstance, context.Background(), nil)
+							if err != nil {
+								logger.Println("Error starting autonomous mode:", err)
+								if err.Error() == "autonomous mode is already running" {
+									IntentPass(req, "intent_imperative_affirmative", "I'm already in autonomous mode.", intentParams, isParam)
+								} else {
+									IntentPass(req, "intent_system_error", "Error starting autonomous mode.", intentParams, isParam)
+								}
+							}
+							// StartAutonomousMode handles its own voice confirmation
+						}
+						successMatched = true
+						break // break from the v loop (utterances)
+					} else if c.Intent == "intent_wirepod_autonomous_stop" {
+						logger.Println("Custom Intent: Matched intent_wirepod_autonomous_stop")
+						// Assuming StopAutonomousMode is in the same package
+						err := StopAutonomousMode()
+						if err != nil {
+							logger.Println("Error stopping autonomous mode:", err)
+							// StopAutonomousMode handles its own voice confirmation, even on error potentially
+						}
+						successMatched = true
+						break // break from the v loop (utterances)
+					} else {
+						// ORIGINAL CUSTOM INTENT EXECUTION LOGIC (Lua, Exec)
+						go func() {
+							if c.LuaScript != "" {
+								err := scripting.RunLuaScript(botSerial, c.LuaScript)
+								if err != nil {
+									logger.Println("Error running Lua script: " + err.Error())
+								}
+							}
+						}()
+
+						var args []string
+						for _, arg := range c.ExecArgs {
+							if arg == "!botSerial" {
+								arg = botSerial
+							} else if arg == "!speechText" {
+								arg = "\"" + voiceText + "\""
+							} else if arg == "!intentName" {
+								arg = c.Name
+							} else if arg == "!locale" {
+								arg = vars.APIConfig.STT.Language
+							}
+							args = append(args, arg)
+						}
+						var customIntentExec *exec.Cmd
+						if c.Exec != "" { // Only prepare and run if Exec is defined
+							if len(args) == 0 {
+								logger.Println("Bot " + botSerial + " Executing: " + c.Exec)
+								customIntentExec = exec.Command(c.Exec)
+							} else {
+								logger.Println("Bot " + botSerial + " Executing: " + c.Exec + " " + strings.Join(args, " "))
+								customIntentExec = exec.Command(c.Exec, args...)
+							}
+							var out bytes.Buffer
+							var stderr bytes.Buffer
+							customIntentExec.Stdout = &out
+							customIntentExec.Stderr = &stderr
+							err := customIntentExec.Run()
+							if err != nil {
+								fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+							}
+							logger.Println("Bot " + botSerial + " Custom Intent Exec Output: " + strings.TrimSpace(string(out.String())))
+
+							if c.IsSystemIntent {
+								var resp systemIntentResponseStruct
+								err := json.Unmarshal(out.Bytes(), &resp)
+								if err == nil && resp.Status == "ok" {
+									logger.Println("Bot " + botSerial + " System intent parsed and executed successfully")
+									IntentPass(req, resp.ReturnIntent, voiceText, intentParams, isParam)
+									successMatched = true
+								} else if err != nil {
+									logger.Println("Error unmarshalling system intent response: ", err)
+								}
+							} else {
+								// If not a system intent, but has exec, still pass the original intent
+								IntentPass(req, c.Intent, voiceText, intentParams, isParam)
+								successMatched = true
+							}
+						} else if c.LuaScript == "" { // If no exec and no Lua script, it's a simple intent pass
+							IntentPass(req, c.Intent, voiceText, intentParams, isParam)
+							successMatched = true
+						}
+						// If only Lua script, success is determined by Lua script actions, not explicitly here
+					}
+					// END OF NEW AUTONOMOUS MODE HANDLING BLOCK (else part)
+					break // break from utterances loop (v)
+				}
+				if successMatched { // if matched an utterance and handled it (either autonomous or other custom)
+					break
+				}
+			}
+			if successMatched { // if matched a custom intent type
+				break
+			}
+		}
+	}
+	return successMatched
+}
+
+func pluginFunctionHandler(req interface{}, voiceText string, botSerial string) bool {
+	matched := false
+	var intent string
+	var igr *vtt.IntentGraphRequest
+	if str, ok := req.(*vtt.IntentGraphRequest); ok {
+		igr = str
+	}
+	var pluginResponse string
+	for num, array := range PluginUtterances {
+		array := array
+		for _, str := range *array {
+			if strings.Contains(voiceText, str) || str == "*" {
+				logger.Println("Bot " + botSerial + " matched plugin " + PluginNames[num] + ", executing function")
+				var guid string
+				var target string
+				for _, bot := range vars.BotInfo.Robots {
+					if bot.Esn == botSerial {
+						guid = bot.GUID
+						target = bot.IPAddress + ":443"
+					}
+				}
+				intent, pluginResponse = PluginFunctions[num](voiceText, botSerial, guid, target)
+				if intent == "" && pluginResponse == "" {
+					// Plugin chose to handle response itself or no response needed
+					matched = true // Consider it matched as plugin took over
+					break
+				}
+				if intent == "" { // Plugin provided response text but no specific intent
+					intent = "intent_imperative_praise" // Default intent for spoken responses
+				}
+				logger.Println("Bot " + botSerial + " plugin " + PluginNames[num] + ", intent: " + intent + ", response: " + pluginResponse)
+				if pluginResponse != "" && igr != nil { // If it's an IntentGraph request and there's spoken text
+					response := &pb.IntentGraphResponse{
+						Session:      igr.Session,
+						DeviceId:     igr.Device,
+						ResponseType: pb.IntentGraphMode_KNOWLEDGE_GRAPH, // Plugins often act like KG
+						SpokenText:   pluginResponse,
+						QueryText:    voiceText,
+						IsFinal:      true,
+					}
+					igr.Stream.Send(response)
+				} else if pluginResponse != "" { // Not IntentGraph, but has spoken text (e.g. regular Intent)
+					KGSim(botSerial, pluginResponse) // Simulate KG response
+				} else { // No spoken text, just pass the intent
+					IntentPass(req, intent, voiceText, make(map[string]string), false)
+				}
+				matched = true
+				break
+			}
+		}
+		if matched {
+			break
+		}
+	}
+	return matched
+}
+
+func ProcessTextAll(req interface{}, voiceText string, intents []vars.JsonIntent, isOpus bool) bool {
+	var botSerial string
+	var reqTypeVTT interface{} // Store the original vtt request type
+
+	if str, ok := req.(*vtt.IntentRequest); ok {
+		botSerial = str.Device
+		reqTypeVTT = str
+	} else if str, ok := req.(*vtt.KnowledgeGraphRequest); ok {
+		botSerial = str.Device
+		reqTypeVTT = str
+	} else if str, ok := req.(*vtt.IntentGraphRequest); ok {
+		botSerial = str.Device
+		reqTypeVTT = str
+	} else {
+		logger.Println("ProcessTextAll: Unknown request type")
+		return false
+	}
+
+	var successMatched bool = false
+	voiceText = strings.ToLower(voiceText)
+
+	// Order of processing: Plugins -> Custom Intents -> Standard Intents
+	successMatched = pluginFunctionHandler(reqTypeVTT, voiceText, botSerial)
+	if successMatched {
+		logger.Println("Intent handled by plugin.")
+		return true
+	}
+
+	successMatched = customIntentHandler(reqTypeVTT, voiceText, botSerial)
+	if successMatched {
+		logger.Println("Intent handled by custom intent handler (possibly autonomous).")
+		return true
+	}
+
+	// If not handled by plugins or custom intents, try standard intents
+	logger.Println("Not a plugin or custom intent, processing standard intents...")
+	var matchedStandardIntent bool = false
+	// Look for a perfect match first
+	for _, b := range intents {
+		for _, c := range b.Keyphrases {
+			if voiceText == strings.ToLower(c) {
+				logger.Println("Bot " + botSerial + " Perfect match for intent " + b.Name + " (" + strings.ToLower(c) + ")")
+				if isOpus { // Assuming isOpus is still relevant here, passed from original call
+					ParamChecker(reqTypeVTT, b.Name, voiceText, botSerial)
+				} else {
+					prehistoricParamChecker(reqTypeVTT, b.Name, voiceText) // Older Opus detection path
+				}
+				matchedStandardIntent = true
+				break
+			}
+		}
+		if matchedStandardIntent {
+			break
+		}
+	}
+	// Not found? Then let's be happy with a bare substring search
+	if !matchedStandardIntent {
+		for _, b := range intents {
+			for _, c := range b.Keyphrases {
+				if strings.Contains(voiceText, strings.ToLower(c)) && !b.RequireExactMatch {
+					logger.Println("Bot " + botSerial + " Partial match for intent " + b.Name + " (" + strings.ToLower(c) + ")")
+					if isOpus {
+						ParamChecker(reqTypeVTT, b.Name, voiceText, botSerial)
+					} else {
+						prehistoricParamChecker(reqTypeVTT, b.Name, voiceText)
+					}
+					matchedStandardIntent = true
+					break
+				}
+			}
+			if matchedStandardIntent {
+				break
+			}
+		}
+	}
+
+	if matchedStandardIntent {
+		logger.Println("Intent handled by standard intent matching.")
+		return true
+	}
+
+	logger.Println("No standard intent matched.")
+	return false // Return false if no standard intent matched either
+}
